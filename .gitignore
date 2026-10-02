@@ -16,6 +16,10 @@ application/*
 AGENTS.md
 delphi-ai
 skills
+!skills/
+skills/*
+!skills/create-executive-landing/
+!skills/create-executive-landing/**
 GEMINI.md
 gemini_memory.md
 .agent
