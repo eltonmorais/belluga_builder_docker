@@ -1,6 +1,28 @@
 # Disposable local knowledge-status adapter
 
+## Prototype artifact-status adapter
+
+The independent `artifact-status` command evaluates the explicit Prototype catalog in the bound Foundation Git checkout. From the Builder repository root:
+
+```sh
+local-api/artifact-status prototypes --mode working-tree
+local-api/artifact-status prototypes --mode committed --revision '<full-foundation-commit-sha>'
+```
+
+It prints a fresh response and atomically replaces the ignored `v1/projects/builder/artifact-status.json` snapshot below the selected Project root. Consumers use that invocation's stdout, never the shared snapshot as current evidence. Exit 0 is complete structural `go`; exit 2 is valid `no_go` JSON; exits 64 and 70 are usage/infrastructure errors and leave any previous snapshot stale. The runner builds and executes a temporary Go binary inside Docker under the caller's host UID/GID. It adds no route to the preview. This Prototype-only operation returns `design_system_validation: not_evaluated`; it does not execute or render sources, approve QA, validate a Design System, or publish assets.
+
 `v1/projects/builder/knowledge-status.json` is an atomically written snapshot of the local evaluator response. It is not canonical project data and is not served by the Builder preview.
+
+## Design System artifact-status adapter
+
+The separate `design-system` target resolves one whole Design System from the trusted local `local-api/source-bindings.json` map; `source-bindings.example.json` shows its redacted shape. Selection is Project, Company, then default. A broken selected binding is a no-go and never falls through. Do not commit the private map or include credentials. The provisional Project source must use the exact `belluga_builder_foundation_documentation/` checkout.
+
+```sh
+local-api/artifact-status design-system --mode working-tree
+local-api/artifact-status design-system --mode committed
+```
+
+Every non-null source binding names a repository ID, workspace-relative Git root, definition path, and revision. Working-tree requires null revisions; committed requires an explicit full SHA. No implicit HEAD, fetch, or key-level merge is supported. Missing map/all-null bindings return exit 2 with `source_binding_missing`. Use only fresh invocation stdout: `inventory_digest` covers all managed files while `definition_digest` covers only the raw definition. The operation does not expose local roots/maps, authenticate ownership, render, publish, or change the preview; Prototype remains separate and reports conformance as `not_evaluated`.
 
 From the Builder repository root, generate a fresh result with:
 
