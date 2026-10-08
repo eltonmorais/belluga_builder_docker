@@ -36,6 +36,8 @@ type PrototypeTransition = {
   to_screen_id: string;
   to_state_id: string;
 };
+type PrototypeScenarioStep = { screen_id: string; state_id: string };
+type PrototypeScenario = { id: string; name: string; steps: PrototypeScenarioStep[] };
 type PrototypeItem = {
   id: string;
   name: string;
@@ -45,6 +47,7 @@ type PrototypeItem = {
   entry_point: string;
   screens: PrototypeScreen[];
   transitions: PrototypeTransition[];
+  scenarios: PrototypeScenario[];
 };
 type PrototypeStatus = { outcome?: string; items?: PrototypeItem[] };
 type Project = {
@@ -98,6 +101,7 @@ function PresentationCanvas({
   detailLoading,
   loadError,
   catalogLoading,
+  artifactDiagnostic,
 }: {
   companyID: string;
   projectID: string;
@@ -114,6 +118,7 @@ function PresentationCanvas({
   detailLoading: boolean;
   loadError: string;
   catalogLoading: boolean;
+  artifactDiagnostic: string;
 }) {
   const [, setQueryRevision] = useState(0);
   const canvasRef = useRef<HTMLElement | null>(null);
@@ -140,37 +145,54 @@ function PresentationCanvas({
     observer.observe(canvas);
     return () => observer.disconnect();
   }, []);
+  const query = new URLSearchParams(location.search);
+  const selectedScenarioID = query.get("scenario_id") || "";
+  const selectedScenarioStepRaw = query.get("scenario_step");
+  const scenarioKeysPresent = query.has("scenario_id") || query.has("scenario_step");
+  const selectedScenario = prototype?.scenarios?.find((item) => item.id === selectedScenarioID);
+  const selectedScenarioStep = selectedScenarioStepRaw !== null && /^\d+$/.test(selectedScenarioStepRaw)
+    ? Number(selectedScenarioStepRaw)
+    : Number.NaN;
+  const selectedStep = Number.isInteger(selectedScenarioStep) ? selectedScenario?.steps[selectedScenarioStep] : undefined;
+  let scenarioError = "";
+  if (scenarioKeysPresent) {
+    if (!selectedScenarioID || selectedScenarioStepRaw === null || !Number.isInteger(selectedScenarioStep) || selectedScenarioStep < 0) {
+      scenarioError = "O link contém uma seleção de cenário inválida.";
+    } else if (!selectedScenario || !selectedStep) {
+      scenarioError = "O cenário ou a etapa selecionada não existe neste snapshot.";
+    } else if (selectedStep.screen_id !== screen?.id || selectedStep.state_id !== state?.id) {
+      scenarioError = "A etapa do cenário não corresponde à Tela e ao Estado selecionados neste link.";
+    }
+  }
   const entryURL =
     prototype && screen && state && pinnedFingerprint
       ? `/snapshot/${encodeURIComponent(companyID)}/${encodeURIComponent(projectID)}/${pinnedFingerprint}/${`${prototype.root}/${screen.path}`.split("/").map(encodeURIComponent).join("/")}?prototype_state=${encodeURIComponent(state.id)}`
       : "";
 
-  const updateQuery = (changes: Record<string, string>) => {
+  const updateQuery = (changes: Record<string, string | null>) => {
     const url = new URL(location.href);
-    Object.entries(changes).forEach(([key, value]) =>
-      url.searchParams.set(key, value),
-    );
+    Object.entries(changes).forEach(([key, value]) => value === null ? url.searchParams.delete(key) : url.searchParams.set(key, value));
     history.replaceState({}, "", url);
     setQueryRevision((value) => value + 1);
     window.dispatchEvent(new PopStateEvent("popstate"));
   };
 
   // URL state is authoritative for the entry point and display preset.
-  const selectedPrototypeID = new URLSearchParams(location.search).get("prototype_id") || "";
-  const selectedScreenID = new URLSearchParams(location.search).get("screen_id") || "";
-  const selectedStateID = new URLSearchParams(location.search).get("state_id") || "";
-  const selectedDevice = new URLSearchParams(location.search).get("device") || "";
-  const selectedScale = new URLSearchParams(location.search).get("scale") || "";
+  const selectedPrototypeID = query.get("prototype_id") || "";
+  const selectedScreenID = query.get("screen_id") || "";
+  const selectedStateID = query.get("state_id") || "";
+  const selectedDevice = query.get("device") || "";
+  const selectedScale = query.get("scale") || "";
   const validPinnedFingerprint = /^[a-f0-9]{64}$/.test(pinnedFingerprint);
   const isValidSelection = Boolean(
     prototype && screen && state && prototype.id === selectedPrototypeID &&
       screen.id === selectedScreenID && state.id === selectedStateID &&
       validPinnedFingerprint &&
       ["mobile", "desktop"].includes(selectedDevice) &&
-      ["fit", "100"].includes(selectedScale) &&
+      ["fit", "100"].includes(selectedScale) && !scenarioError &&
       selectedDevice === activeDevice && selectedScale === activeScale,
   );
-  const entryKey = `${entryURL}|${fingerprint}|${pinnedFingerprint}`;
+  const entryKey = `${entryURL}|${fingerprint}|${pinnedFingerprint}|${selectedScenarioID}|${selectedScenarioStepRaw ?? ""}`;
   const currentEntryCheck = entryCheck?.key === entryKey ? entryCheck : null;
   const entryStatus = currentEntryCheck?.status || "checking";
   const entryError = currentEntryCheck?.error || "";
@@ -236,14 +258,32 @@ function PresentationCanvas({
           const next = prototypes.find((item) => item.id === event.target.value);
           const nextScreen = next?.screens.find((item) => item.path === next.entry_point) ?? next?.screens[0];
           const nextState = nextScreen?.states.find((item) => item.id === nextScreen.default_state_id) ?? nextScreen?.states[0];
-          updateQuery({ artifact: `prototype:${next?.id || ""}`, prototype_id: next?.id || "", screen_id: nextScreen?.id || "", state_id: nextState?.id || "" });
+          updateQuery({ artifact: `prototype:${next?.id || ""}`, prototype_id: next?.id || "", screen_id: nextScreen?.id || "", state_id: nextState?.id || "", scenario_id: null, scenario_step: null });
         }}>{prototypes.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label>Cenário<select aria-label="Cenário" value={scenarioKeysPresent ? selectedScenarioID : ""} onChange={(event) => {
+          const next = prototype?.scenarios?.find((item) => item.id === event.target.value);
+          const step = next?.steps[0];
+          updateQuery({ scenario_id: next?.id || null, scenario_step: step ? "0" : null, screen_id: step?.screen_id || screen?.id || "", state_id: step?.state_id || state?.id || "" });
+        }}><option value="">Exploração manual</option>{(prototype?.scenarios || []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        {selectedScenario && selectedStep && !scenarioError && <div className="prototype-presentation-scenario" role="group" aria-label="Etapas do cenário">
+          <button aria-label="Etapa anterior" disabled={selectedScenarioStep <= 0} onClick={() => {
+            const index = selectedScenarioStep - 1;
+            const step = selectedScenario.steps[index];
+            if (step) updateQuery({ scenario_step: String(index), screen_id: step.screen_id, state_id: step.state_id });
+          }}>Anterior</button>
+          <span aria-live="polite">Etapa {selectedScenarioStep + 1} de {selectedScenario.steps.length}</span>
+          <button aria-label="Próxima etapa" disabled={selectedScenarioStep >= selectedScenario.steps.length - 1} onClick={() => {
+            const index = selectedScenarioStep + 1;
+            const step = selectedScenario.steps[index];
+            if (step) updateQuery({ scenario_step: String(index), screen_id: step.screen_id, state_id: step.state_id });
+          }}>Próxima</button>
+        </div>}
         <label>Ir para tela<select aria-label="Ir para tela" value={screen?.id || ""} onChange={(event) => {
           const next = prototype?.screens.find((item) => item.id === event.target.value);
           const nextState = next?.states.find((item) => item.id === next.default_state_id) ?? next?.states[0];
-          updateQuery({ screen_id: next?.id || "", state_id: nextState?.id || "" });
+          updateQuery({ screen_id: next?.id || "", state_id: nextState?.id || "", scenario_id: null, scenario_step: null });
         }}>{(prototype?.screens || []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        <label>Estado<select aria-label="Estado" value={state?.id || ""} onChange={(event) => updateQuery({ state_id: event.target.value })}>{(screen?.states || []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label>Estado<select aria-label="Estado" value={state?.id || ""} onChange={(event) => updateQuery({ state_id: event.target.value, scenario_id: null, scenario_step: null })}>{(screen?.states || []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <div className="prototype-presentation-toggle" role="group" aria-label="Dispositivo">
           <button aria-pressed={activeDevice === "mobile"} onClick={() => updateQuery({ device: "mobile" })}>Mobile</button>
           <button aria-pressed={activeDevice === "desktop"} onClick={() => updateQuery({ device: "desktop" })}>Desktop</button>
@@ -252,7 +292,7 @@ function PresentationCanvas({
           <button aria-pressed={activeScale === "fit"} onClick={() => updateQuery({ scale: "fit" })}>Ajustar</button>
           <button aria-pressed={activeScale === "100"} onClick={() => updateQuery({ scale: "100" })}>100%</button>
         </div>
-        <a href={entryURL} target="_blank" rel="noopener noreferrer">Abrir HTML bruto ↗</a>
+        {entryStatus === "ready" && validEntry && isValidSelection && entryURL ? <a href={entryURL} target="_blank" rel="noopener noreferrer">Abrir HTML bruto ↗</a> : <span aria-disabled="true">Abrir HTML bruto indisponível</span>}
         <details className="prototype-presentation-fingerprint">
           <summary aria-label={`Snapshot fingerprint ${pinnedFingerprint || "indisponível"}`}>
             Snapshot · {pinnedFingerprint ? `${pinnedFingerprint.slice(0, 8)}…` : "indisponível"}
@@ -264,10 +304,10 @@ function PresentationCanvas({
         {catalogLoading ? <p role="status">Carregando registro local…</p>
           : loadError ? <p role="alert">{loadError}</p>
             : detailLoading ? <p role="status">Carregando dados do snapshot…</p>
-              : !isValidSelection ? <p role="alert">Seleção inválida. Este link não identifica um Protótipo, Tela ou Estado disponível.</p>
+              : !isValidSelection ? <p role="alert">{artifactDiagnostic || scenarioError || "Seleção inválida. Este link não identifica um Protótipo, Tela ou Estado disponível."}</p>
                 : entryStatus === "checking" ? <p role="status">Verificando entrada do snapshot…</p>
                   : entryStatus === "error" ? <p role="alert">{entryError}</p>
-                    : validEntry ? <div className="prototype-presentation-frame" style={{ width: dimensions.width * fitScale, height: dimensions.height * fitScale }}><iframe key={entryURL} title={`${prototype?.name} · ${screen?.name} · ${state?.name}`} src={entryURL} sandbox="allow-scripts" referrerPolicy="no-referrer" style={{ width: dimensions.width, height: dimensions.height, transform: `scale(${fitScale})`, transformOrigin: "top left" }} /></div> : null}
+                    : validEntry ? <div className="prototype-presentation-frame" style={{ width: dimensions.width * fitScale, height: dimensions.height * fitScale }}><iframe key={entryKey} title={`${prototype?.name} · ${screen?.name} · ${state?.name}`} src={entryURL} sandbox="allow-scripts" referrerPolicy="no-referrer" style={{ width: dimensions.width, height: dimensions.height, transform: `scale(${fitScale})`, transformOrigin: "top left" }} /></div> : null}
       </section>
     </main>
   );
@@ -414,10 +454,15 @@ export function LocalArtifactPreview() {
     Boolean(activeDetail.snapshot_fingerprint);
   const prototypeStatus = activeDetail?.snapshot_observations
     ?.prototype_status as PrototypeStatus | undefined;
-  const prototypes =
-    detailVerified && prototypeStatus?.outcome === "go"
-      ? (prototypeStatus.items ?? [])
-      : [];
+  const prototypes = useMemo(() => {
+    if (!detailVerified || prototypeStatus?.outcome !== "go") return [];
+    const availablePrototypeIDs = new Set(
+      (activeDetail?.artifacts ?? [])
+        .filter((artifact) => artifact.kind === "prototype" && artifact.state === "available" && artifact.entry_point)
+        .map((artifact) => artifact.id),
+    );
+    return (prototypeStatus.items ?? []).filter((item) => availablePrototypeIDs.has(item.id));
+  }, [activeDetail?.artifacts, detailVerified, prototypeStatus]);
   const prototypeByID = new Map(prototypes.map((item) => [item.id, item]));
   useEffect(() => {
     const selectedPrototype = prototypes.find(
@@ -442,6 +487,9 @@ export function LocalArtifactPreview() {
   const landingVisualState = detailVerified
     ? activeDetail.artifacts.find((a) => a.kind === "landing")?.state
     : undefined;
+  const prototypeUnavailableDiagnostic = activeDetail?.artifacts.find(
+    (artifact) => (artifact.kind === "prototype" || artifact.kind === "prototype_collection") && artifact.state === "invalid" && artifact.diagnostic,
+  )?.diagnostic;
   const selected =
     visibleAvailable.find((a) => artifactKey(a) === artifactID) ??
     visibleAvailable[0];
@@ -530,6 +578,9 @@ export function LocalArtifactPreview() {
   const presentationPrototype = prototypes.find(
     (item) => item.id === presentationPrototypeID,
   );
+  const presentationArtifactDiagnostic = activeDetail?.artifacts.find(
+    (artifact) => artifact.kind === "prototype" && artifact.id === presentationPrototypeID && artifact.state === "invalid" && artifact.diagnostic,
+  )?.diagnostic || "";
   const presentationScreen = presentationPrototype?.screens.find(
     (item) => item.id === presentationQuery.get("screen_id"),
   );
@@ -579,6 +630,7 @@ export function LocalArtifactPreview() {
         detailLoading={Boolean(project && !activeDetail && !error)}
         loadError={error}
         catalogLoading={catalogLoading}
+        artifactDiagnostic={presentationArtifactDiagnostic}
       />
     );
   }
@@ -742,6 +794,9 @@ export function LocalArtifactPreview() {
               {activeDetail.diagnostic} {activeDetail.next_action}
             </p>
           )}
+        {detailVerified && prototypeUnavailableDiagnostic && (
+          <p role="alert" className="workspace-error">{prototypeUnavailableDiagnostic}</p>
+        )}
         {!project && (
           <p>
             Registre um Project explicitamente para exibi-lo neste painel local.

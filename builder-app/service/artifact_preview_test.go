@@ -189,9 +189,9 @@ func TestRegisteredPreviewRejectsPrivatePrototypeRelatedFromSnapshot(t *testing.
 	}
 }
 
-func TestRegisteredPreviewReturnsTeachForAvailablePrototypeWithLegacyStatusSchema(t *testing.T) {
+func TestRegisteredPreviewHidesAvailablePrototypeWithLegacyStatusButKeepsOtherArtifacts(t *testing.T) {
 	root := t.TempDir()
-	manifest := []byte(`{"schema_version":"1","id":"demo","entry_point":"index.html","related":[]}`)
+	manifest := []byte(`{"schema_version":"2","id":"demo","entry_point":"index.html","related":[]}`)
 	snapshot := registeredSnapshot{
 		SchemaVersion: "builder-project-snapshot-v1",
 		ProjectID:     "trial-project",
@@ -200,9 +200,10 @@ func TestRegisteredPreviewReturnsTeachForAvailablePrototypeWithLegacyStatusSchem
 		Files: map[string][]byte{
 			"prototypes/demo/prototype.json": manifest,
 			"prototypes/demo/index.html":     []byte("<main>legacy prototype</main>"),
+			"design/landing/index.html":      []byte("<main>Landing</main>"),
 		},
-		Artifacts:    []registeredArtifact{{ID: "demo", Kind: "prototype", Name: "Demo", State: "available", Entry: "prototypes/demo/index.html", Files: []string{"prototypes/demo/prototype.json", "prototypes/demo/index.html"}}},
-		Observations: map[string]json.RawMessage{"prototype_status": json.RawMessage(`{"schema_version":"1","project_id":"trial-project","target":"prototypes","outcome":"go","items":[{"id":"demo","screens":[{"id":"start","path":"index.html"}]}]}`)},
+		Artifacts:    []registeredArtifact{{ID: "demo", Kind: "prototype", Name: "Demo", State: "available", Entry: "prototypes/demo/index.html", Files: []string{"prototypes/demo/prototype.json", "prototypes/demo/index.html"}}, {ID: "landing", Kind: "landing", Name: "Landing", State: "available", Entry: "design/landing/index.html", Files: []string{"design/landing/index.html"}}},
+		Observations: map[string]json.RawMessage{"prototype_status": json.RawMessage(`{"schema_version":"2","project_id":"trial-project","target":"prototypes","outcome":"go","items":[{"id":"demo","screens":[{"id":"start","path":"index.html"}]}]}`)},
 	}
 	snapshotBytes, err := json.Marshal(snapshot)
 	if err != nil {
@@ -228,12 +229,56 @@ func TestRegisteredPreviewReturnsTeachForAvailablePrototypeWithLegacyStatusSchem
 	response := httptest.NewRecorder()
 	(&registeredPreview{root: root}).apiHandler(response, httptest.NewRequest("GET", "/api/local-preview?company_id=trial-company&project_id=trial-project", nil))
 	var body struct {
-		ConsumerReadiness string `json:"consumer_readiness"`
-		Diagnostic        string `json:"diagnostic"`
-		NextAction        string `json:"next_action"`
+		ConsumerReadiness   string               `json:"consumer_readiness"`
+		SnapshotFingerprint string               `json:"snapshot_fingerprint"`
+		Artifacts           []registeredArtifact `json:"artifacts"`
 	}
-	if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.ConsumerReadiness != "not_ready" || !strings.Contains(body.Diagnostic, "unsupported schema") || !strings.Contains(body.NextAction, "TEACH") || strings.Contains(response.Body.String(), fingerprint) {
-		t.Fatalf("legacy Prototype status was served as ready: status=%d body=%s", response.Code, response.Body.String())
+	if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.ConsumerReadiness != "ready" || body.SnapshotFingerprint != fingerprint {
+		t.Fatalf("legacy Prototype blocked unrelated snapshot content: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var prototype registeredArtifact
+	for _, artifact := range body.Artifacts {
+		if artifact.Kind == "prototype" {
+			prototype = artifact
+		}
+	}
+	if prototype.State != "invalid" || !strings.Contains(prototype.Diagnostic, "schema v2") || !strings.Contains(prototype.Diagnostic, "TEACH") || !strings.Contains(prototype.Diagnostic, "fresh Prototype status") {
+		t.Fatalf("legacy Prototype did not receive migration TEACH: %#v", prototype)
+	}
+	raw := httptest.NewRecorder()
+	(&registeredPreview{root: root}).artifactHandler(raw, httptest.NewRequest("GET", "/snapshot/trial-company/trial-project/"+fingerprint+"/prototypes/demo/index.html", nil))
+	if raw.Code != 404 {
+		t.Fatalf("unsupported Prototype HTML remained available: status=%d body=%s", raw.Code, raw.Body.String())
+	}
+	landing := httptest.NewRecorder()
+	(&registeredPreview{root: root}).artifactHandler(landing, httptest.NewRequest("GET", "/snapshot/trial-company/trial-project/"+fingerprint+"/design/landing/index.html", nil))
+	if landing.Code != 200 {
+		t.Fatalf("unrelated Landing was blocked: status=%d body=%s", landing.Code, landing.Body.String())
+	}
+
+	// A v2 observation is harmless when this snapshot has no available Prototype.
+	snapshot.Artifacts = []registeredArtifact{{ID: "landing", Kind: "landing", Name: "Landing", State: "available", Entry: "design/landing/index.html", Files: []string{"design/landing/index.html"}}}
+	snapshotBytes, err = json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash = sha256.Sum256(snapshotBytes)
+	noPrototypeFingerprint := hex.EncodeToString(hash[:])
+	if err := os.WriteFile(filepath.Join(root, "snapshots", noPrototypeFingerprint+".json"), snapshotBytes, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	registry.Projects["trial-project"] = persistedProject{registeredProject: registeredProject{ID: "trial-project", Name: "Trial Project", CompanyID: "trial-company", PreparationState: "ready", SnapshotFingerprint: noPrototypeFingerprint, Artifacts: snapshot.Artifacts}, Binding: &persistedBinding{WorkspaceRoot: "/tmp/trial", ProjectRoot: "project", FoundationRoot: "project/foundation"}}
+	registryBytes, err = json.Marshal(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "registry.json"), registryBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withoutPrototype := httptest.NewRecorder()
+	(&registeredPreview{root: root}).apiHandler(withoutPrototype, httptest.NewRequest("GET", "/api/local-preview?company_id=trial-company&project_id=trial-project", nil))
+	if withoutPrototype.Code != 200 || !strings.Contains(withoutPrototype.Body.String(), `"consumer_readiness":"ready"`) || strings.Contains(withoutPrototype.Body.String(), `"kind":"prototype"`) {
+		t.Fatalf("v2 observation without an available Prototype blocked unrelated views or exposed Prototype: status=%d body=%s", withoutPrototype.Code, withoutPrototype.Body.String())
 	}
 }
 
@@ -241,14 +286,14 @@ func TestPrototypeStatusRequiresViewerArrays(t *testing.T) {
 	base := registeredSnapshot{
 		ProjectID: "trial-project",
 		Files: map[string][]byte{
-			"prototypes/demo/prototype.json": []byte(`{"schema_version":"2","id":"demo"}`),
+			"prototypes/demo/prototype.json": []byte(`{"schema_version":"3","id":"demo","scenarios":[]}`),
 		},
 		Artifacts: []registeredArtifact{{ID: "demo", Kind: "prototype", State: "available", Entry: "prototypes/demo/start.html"}},
 	}
-	observation := `{"schema_version":"2","project_id":"trial-project","target":"prototypes","authority_scope":"local_structure_only","outcome":"go","items":[{"id":"demo","root":"prototypes/demo","entry_point":"start.html","screens":[{"id":"start","path":"start.html","default_state_id":"default","states":[{"id":"default","approved_references":[]}]}],"transitions":[]}]}`
+	observation := `{"schema_version":"3","project_id":"trial-project","target":"prototypes","authority_scope":"local_structure_only","outcome":"go","items":[{"id":"demo","root":"prototypes/demo","entry_point":"start.html","screens":[{"id":"start","path":"start.html","default_state_id":"default","states":[{"id":"default","approved_references":[]}]}],"transitions":[],"scenarios":[]}]}`
 	base.Observations = map[string]json.RawMessage{"prototype_status": json.RawMessage(observation)}
 	if !validPrototypeStatusObservation(base) {
-		t.Fatal("complete v2 status was rejected")
+		t.Fatal("complete v3 status was rejected")
 	}
 	for _, tc := range []struct {
 		name string
@@ -257,6 +302,7 @@ func TestPrototypeStatusRequiresViewerArrays(t *testing.T) {
 	}{
 		{"missing transitions", `,"transitions":[]`, ""},
 		{"missing approved references", `,"approved_references":[]`, ""},
+		{"missing scenarios", `,"scenarios":[]`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			changed := base
@@ -266,4 +312,90 @@ func TestPrototypeStatusRequiresViewerArrays(t *testing.T) {
 			}
 		})
 	}
+	manifestMismatch := base
+	manifestMismatch.Files = map[string][]byte{"prototypes/demo/prototype.json": []byte(`{"schema_version":"3","id":"demo","scenarios":[{"id":"other","name":"Other","steps":[{"screen_id":"start","state_id":"default"}]}]}`)}
+	if validPrototypeStatusObservation(manifestMismatch) {
+		t.Fatal("saved scenario projection mismatch was accepted")
+	}
+}
+
+func TestRegisteredPreviewServesMatchingNonemptyScenarioProjectionAndRejectsMalformedRows(t *testing.T) {
+	serve := func(t *testing.T, variant string) (*httptest.ResponseRecorder, *httptest.ResponseRecorder) {
+		t.Helper()
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "snapshots"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		scenario := `[{"id":"review","name":"Review path","steps":[{"screen_id":"start","state_id":"default"},{"screen_id":"start","state_id":"default"}]}]`
+		statusScenario := scenario
+		if variant == "mismatch" {
+			scenario = `[{"id":"other","name":"Different path","steps":[{"screen_id":"start","state_id":"default"}]}]`
+		} else if variant == "malformed" {
+			scenario = `[{"id":"review","name":"Review path","steps":[]}]`
+			statusScenario = scenario
+		}
+		manifest := []byte(`{"schema_version":"3","id":"demo","related":[],"scenarios":` + scenario + `}`)
+		entry := []byte("<main>Scenario entry</main>")
+		status := json.RawMessage(`{"schema_version":"3","project_id":"trial-project","target":"prototypes","authority_scope":"local_structure_only","outcome":"go","items":[{"id":"demo","root":"prototypes/demo","entry_point":"start.html","screens":[{"id":"start","path":"start.html","default_state_id":"default","states":[{"id":"default","approved_references":[]}]}],"transitions":[],"scenarios":` + statusScenario + `}]}`)
+		snapshot := registeredSnapshot{
+			SchemaVersion: "builder-project-snapshot-v1", ProjectID: "trial-project", CompanyID: "trial-company", ObservedAt: "2026-10-08T00:00:00Z",
+			Files:        map[string][]byte{"prototypes/demo/prototype.json": manifest, "prototypes/demo/start.html": entry},
+			Artifacts:    []registeredArtifact{{ID: "demo", Kind: "prototype", Name: "Demo", State: "available", Entry: "prototypes/demo/start.html", Files: []string{"prototypes/demo/prototype.json", "prototypes/demo/start.html"}}},
+			Observations: map[string]json.RawMessage{"prototype_status": status},
+		}
+		snapshotBytes, err := json.Marshal(snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash := sha256.Sum256(snapshotBytes)
+		fingerprint := hex.EncodeToString(hash[:])
+		if err := os.WriteFile(filepath.Join(root, "snapshots", fingerprint+".json"), snapshotBytes, 0o444); err != nil {
+			t.Fatal(err)
+		}
+		registry := persistedRegistration{
+			SchemaVersion: "builder-project-registry-v1",
+			Companies:     map[string]registeredCompany{"trial-company": {ID: "trial-company", Name: "Trial Company"}},
+			Projects:      map[string]persistedProject{"trial-project": {registeredProject: registeredProject{ID: "trial-project", Name: "Trial Project", CompanyID: "trial-company", PreparationState: "ready", SnapshotFingerprint: fingerprint, Artifacts: snapshot.Artifacts}, Binding: &persistedBinding{WorkspaceRoot: "/tmp/trial", ProjectRoot: "project", FoundationRoot: "project/foundation"}}},
+			Preferences:   map[string]persistedPreference{},
+		}
+		registryBytes, err := json.Marshal(registry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "registry.json"), registryBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		consumer := &registeredPreview{root: root}
+		api := httptest.NewRecorder()
+		consumer.apiHandler(api, httptest.NewRequest("GET", "/api/local-preview?company_id=trial-company&project_id=trial-project", nil))
+		raw := httptest.NewRecorder()
+		consumer.artifactHandler(raw, httptest.NewRequest("GET", "/snapshot/trial-company/trial-project/"+fingerprint+"/prototypes/demo/start.html", nil))
+		return api, raw
+	}
+	t.Run("matching ordered repeated pairs", func(t *testing.T) {
+		api, raw := serve(t, "matching")
+		var apiBody struct {
+			SnapshotObservations map[string]json.RawMessage `json:"snapshot_observations"`
+		}
+		var statusBody struct {
+			Items []struct {
+				Scenarios []savedScenario `json:"scenarios"`
+			} `json:"items"`
+		}
+		if api.Code != 200 || !strings.Contains(api.Body.String(), `"consumer_readiness":"ready"`) || json.Unmarshal(api.Body.Bytes(), &apiBody) != nil || json.Unmarshal(apiBody.SnapshotObservations["prototype_status"], &statusBody) != nil || len(statusBody.Items) != 1 || !sameSavedScenarios(statusBody.Items[0].Scenarios, []savedScenario{{ID: "review", Name: "Review path", Steps: []savedScenarioStep{{ScreenID: "start", StateID: "default"}, {ScreenID: "start", StateID: "default"}}}}) || raw.Code != 200 || raw.Body.String() != "<main>Scenario entry</main>" {
+			t.Fatalf("matching scenario snapshot was not usable: API=%d %s raw=%d %s", api.Code, api.Body.String(), raw.Code, raw.Body.String())
+		}
+	})
+	t.Run("scenario mismatch fails closed", func(t *testing.T) {
+		api, raw := serve(t, "mismatch")
+		if api.Code != 200 || !strings.Contains(api.Body.String(), `"state":"invalid"`) || !strings.Contains(api.Body.String(), "projection does not match") || raw.Code != 404 {
+			t.Fatalf("scenario mismatch was not rejected: API=%d %s raw=%d %s", api.Code, api.Body.String(), raw.Code, raw.Body.String())
+		}
+	})
+	t.Run("matching but empty steps fail closed", func(t *testing.T) {
+		api, raw := serve(t, "malformed")
+		if api.Code != 200 || !strings.Contains(api.Body.String(), `"state":"invalid"`) || raw.Code != 404 {
+			t.Fatalf("malformed matching scenario was not rejected: API=%d %s raw=%d %s", api.Code, api.Body.String(), raw.Code, raw.Body.String())
+		}
+	})
 }

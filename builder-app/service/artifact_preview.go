@@ -18,8 +18,6 @@ import (
 
 type registeredPreview struct{ root string }
 
-var errUnsupportedPrototypeStatus = errors.New("saved Prototype status schema is unsupported")
-
 type registeredCompany struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -277,19 +275,6 @@ func (p *registeredPreview) apiHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		snapshot, fingerprint, e := p.snapshot(project.ID, project.CompanyID, project.SnapshotFingerprint)
 		if e != nil {
-			if errors.Is(e, errUnsupportedPrototypeStatus) {
-				writeJSON(w, 200, map[string]any{
-					"schema_version":     "1",
-					"company_id":         companyID,
-					"project_id":         projectID,
-					"registration_state": "registered",
-					"consumer_readiness": "not_ready",
-					"artifacts":          project.Artifacts,
-					"diagnostic":         "The saved Prototype uses an unsupported schema and cannot be displayed.",
-					"next_action":        "TEACH: refresh this matching Project with builder-project register using its confirmed Company and Project identities, then load the panel again.",
-				})
-				return
-			}
 			writeError(w, 503, "snapshot_integrity_failure")
 			return
 		}
@@ -355,7 +340,19 @@ func (p *registeredPreview) snapshot(projectID, companyID, fingerprint string) (
 		}
 	}
 	if hasAvailablePrototype(snapshot.Artifacts) && !validPrototypeStatusObservation(snapshot) {
-		return registeredSnapshot{}, "", errUnsupportedPrototypeStatus
+		diagnostic := "Saved Prototype projection does not match its admitted v3 manifest; correct the source and explicitly refresh registration."
+		if savedPrototypeSchema(snapshot) == "2" {
+			diagnostic = "Saved Prototype schema v2 is not available after the v3 cutover. TEACH: run fresh Prototype status; adapt every offending v2 catalog/manifest, including archived candidates, to schema_version 3; confirm the complete collection is go; then explicitly refresh registration. Registration alone cannot repair source."
+		}
+		for i := range snapshot.Artifacts {
+			artifact := &snapshot.Artifacts[i]
+			if artifact.Kind == "prototype" && artifact.State == "available" {
+				artifact.State = "invalid"
+				artifact.Entry = ""
+				artifact.Files = nil
+				artifact.Diagnostic = diagnostic
+			}
+		}
 	}
 	return snapshot, actual, nil
 }
@@ -367,6 +364,14 @@ func hasAvailablePrototype(artifacts []registeredArtifact) bool {
 		}
 	}
 	return false
+}
+
+func savedPrototypeSchema(snapshot registeredSnapshot) string {
+	var status struct {
+		SchemaVersion string `json:"schema_version"`
+	}
+	_ = json.Unmarshal(snapshot.Observations["prototype_status"], &status)
+	return status.SchemaVersion
 }
 
 func validPrototypeStatusObservation(snapshot registeredSnapshot) bool {
@@ -394,9 +399,10 @@ func validPrototypeStatusObservation(snapshot registeredSnapshot) bool {
 				} `json:"states"`
 			} `json:"screens"`
 			Transitions []json.RawMessage `json:"transitions"`
+			Scenarios   []savedScenario   `json:"scenarios"`
 		} `json:"items"`
 	}
-	if json.Unmarshal(data, &status) != nil || status.SchemaVersion != "2" || status.ProjectID != snapshot.ProjectID || status.Target != "prototypes" || status.Authority != "local_structure_only" || status.Outcome != "go" || status.Items == nil {
+	if json.Unmarshal(data, &status) != nil || status.SchemaVersion != "3" || status.ProjectID != snapshot.ProjectID || status.Target != "prototypes" || status.Authority != "local_structure_only" || status.Outcome != "go" || status.Items == nil {
 		return false
 	}
 	for _, artifact := range snapshot.Artifacts {
@@ -417,6 +423,7 @@ func validPrototypeStatusObservation(snapshot registeredSnapshot) bool {
 				} `json:"states"`
 			} `json:"screens"`
 			Transitions []json.RawMessage `json:"transitions"`
+			Scenarios   []savedScenario   `json:"scenarios"`
 		}
 		for i := range status.Items {
 			if status.Items[i].ID == artifact.ID {
@@ -424,7 +431,7 @@ func validPrototypeStatusObservation(snapshot registeredSnapshot) bool {
 				break
 			}
 		}
-		if item == nil || item.Root == "" || item.EntryPoint == "" || len(item.Screens) == 0 || item.Transitions == nil {
+		if item == nil || item.Root == "" || item.EntryPoint == "" || len(item.Screens) == 0 || item.Transitions == nil || item.Scenarios == nil {
 			return false
 		}
 		manifestPath := path.Join(item.Root, "prototype.json")
@@ -433,22 +440,25 @@ func validPrototypeStatusObservation(snapshot registeredSnapshot) bool {
 			return false
 		}
 		var manifest struct {
-			SchemaVersion string `json:"schema_version"`
-			ID            string `json:"id"`
+			SchemaVersion string          `json:"schema_version"`
+			ID            string          `json:"id"`
+			Scenarios     []savedScenario `json:"scenarios"`
 		}
-		if json.Unmarshal(manifestBytes, &manifest) != nil || manifest.SchemaVersion != "2" || manifest.ID != artifact.ID {
+		if json.Unmarshal(manifestBytes, &manifest) != nil || manifest.SchemaVersion != "3" || manifest.ID != artifact.ID || manifest.Scenarios == nil || !sameSavedScenarios(manifest.Scenarios, item.Scenarios) {
 			return false
 		}
 		entryMatches := false
+		declaredPairs := make(map[string]bool)
 		for _, screen := range item.Screens {
-			if screen.ID == "" || screen.Path == "" || screen.DefaultStateID == "" || len(screen.States) == 0 {
+			if !validRegistrationID(screen.ID) || screen.Path == "" || !validRegistrationID(screen.DefaultStateID) || len(screen.States) == 0 {
 				return false
 			}
 			defaultFound := false
 			for _, state := range screen.States {
-				if state.ApprovedReferences == nil {
+				if !validRegistrationID(state.ID) || state.ApprovedReferences == nil {
 					return false
 				}
+				declaredPairs[screen.ID+"\x00"+state.ID] = true
 				if state.ID == screen.DefaultStateID {
 					defaultFound = true
 				}
@@ -463,8 +473,37 @@ func validPrototypeStatusObservation(snapshot registeredSnapshot) bool {
 		if !entryMatches || artifact.Entry != path.Join(item.Root, item.EntryPoint) {
 			return false
 		}
+		seenScenarioIDs := make(map[string]bool, len(item.Scenarios))
+		for _, scenario := range item.Scenarios {
+			if !validRegistrationID(scenario.ID) || seenScenarioIDs[scenario.ID] || !validRegistrationName(scenario.Name) || len(scenario.Steps) == 0 {
+				return false
+			}
+			seenScenarioIDs[scenario.ID] = true
+			for _, step := range scenario.Steps {
+				if !validRegistrationID(step.ScreenID) || !validRegistrationID(step.StateID) || !declaredPairs[step.ScreenID+"\x00"+step.StateID] {
+					return false
+				}
+			}
+		}
 	}
 	return true
+}
+
+type savedScenario struct {
+	ID    string              `json:"id"`
+	Name  string              `json:"name"`
+	Steps []savedScenarioStep `json:"steps"`
+}
+
+type savedScenarioStep struct {
+	ScreenID string `json:"screen_id"`
+	StateID  string `json:"state_id"`
+}
+
+func sameSavedScenarios(left, right []savedScenario) bool {
+	leftBytes, leftErr := json.Marshal(left)
+	rightBytes, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && string(leftBytes) == string(rightBytes)
 }
 
 func safeSnapshotPath(value string) bool {

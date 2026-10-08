@@ -92,6 +92,7 @@ const detail = (
         "sha256-utf8-sorted-path-tab-content-sha256-newline-v1",
     },
     prototype_status: {
+      schema_version: "3",
       outcome: "go",
       items: artifacts
         .filter((item) => item.kind === "prototype")
@@ -165,6 +166,18 @@ const detail = (
               to_state_id: "expanded",
             },
           ],
+          scenarios: [
+            {
+              id: "review-path",
+              name: "Review path",
+              steps: [
+                { screen_id: "start", state_id: "initial" },
+                { screen_id: "details", state_id: "collapsed" },
+                { screen_id: "details", state_id: "expanded" },
+                { screen_id: "details", state_id: "expanded" },
+              ],
+            },
+          ],
         })),
     },
   },
@@ -212,6 +225,31 @@ describe("LocalArtifactPreview", () => {
     expect(
       screen.queryByTitle("Landing A · artefato isolado"),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps Landing usable and shows migration TEACH for an unavailable saved v2 Prototype", async () => {
+    const fingerprint = "a".repeat(64);
+    const migrated = {
+      ...detail(fingerprint, catalog.projects[0].artifacts),
+      artifacts: [
+        { id: "landing", kind: "landing", name: "Landing A", state: "available", entry_point: "design/landing/index.html" },
+        { id: "prototypes", kind: "prototype_collection", name: "Prototype", state: "invalid", diagnostic: "Prototype schema v2 is not available after the v3 cutover. TEACH: run fresh Prototype status; adapt every offending v2 catalog/manifest, including archived candidates, to schema_version 3; confirm the complete collection is go; then explicitly refresh registration." },
+      ],
+      snapshot_observations: {
+        prototype_status: { schema_version: "2", outcome: "no_go", items: [] },
+      },
+    };
+    vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL) =>
+      String(url) === "/api/local-preview" ? response(catalog) : response(migrated),
+    ));
+    render(<LocalArtifactPreview />);
+    await screen.findByRole("option", { name: "Company A" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Empresa" }), { target: { value: "company-a" } });
+    expect(await screen.findByTitle("Landing A · artefato isolado")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("fresh Prototype status");
+    expect(screen.getByRole("alert")).toHaveTextContent("adapt every offending v2 catalog/manifest");
+    expect(screen.getByRole("alert")).toHaveTextContent("explicitly refresh registration");
+    expect(screen.queryByRole("button", { name: "Prototype with colliding ID" })).not.toBeInTheDocument();
   });
 
   it("selects registered Company/Project, loads current observations and serves fingerprint-scoped entry", async () => {
@@ -885,6 +923,158 @@ describe("LocalArtifactPreview", () => {
     expect(new URLSearchParams(location.search).get("state_id")).toBe("initial");
   });
 
+  it("plays an ordered scenario, remounts repeated pairs, and returns to manual browsing", async () => {
+    const fingerprint = "a".repeat(64);
+    history.replaceState({}, "", `/local?mode=presentation&company_id=company-a&project_id=project-a&artifact=prototype%3Alanding&prototype_id=landing&screen_id=start&state_id=initial&scenario_id=review-path&scenario_step=0&fingerprint=${fingerprint}&device=mobile&scale=fit`);
+    const headRequests: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/local-preview") return response(catalog);
+      if (url.startsWith("/api/local-preview?")) return response(detail(fingerprint, catalog.projects[0].artifacts));
+      if (init?.method === "HEAD") {
+        headRequests.push(url);
+        return Promise.resolve(new Response(null, { status: 200, headers: { "X-Builder-Snapshot-Fingerprint": fingerprint } }));
+      }
+      return response({});
+    }));
+
+    render(<LocalArtifactPreview />);
+    const firstFrame = await screen.findByTitle("Prototype with colliding ID · Start · Initial");
+    expect(screen.getByRole("combobox", { name: "Cenário" })).toHaveValue("review-path");
+    expect(screen.getByText("Etapa 1 de 4")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Etapa anterior" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Próxima etapa" }));
+    const collapsedFrame = await screen.findByTitle("Prototype with colliding ID · Details · Collapsed");
+    expect(new URLSearchParams(location.search).get("scenario_step")).toBe("1");
+    fireEvent.click(screen.getByRole("button", { name: "Próxima etapa" }));
+    const expandedFrame = await screen.findByTitle("Prototype with colliding ID · Details · Expanded");
+    fireEvent.click(screen.getByRole("button", { name: "Próxima etapa" }));
+    await waitFor(() => expect(new URLSearchParams(location.search).get("scenario_step")).toBe("3"));
+    await waitFor(() => expect(document.querySelector("iframe")).not.toBe(expandedFrame));
+    expect(screen.getByText("Etapa 4 de 4")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Próxima etapa" })).toBeDisabled();
+    expect(document.querySelector("iframe")).not.toBe(firstFrame);
+    expect(document.querySelector("iframe")).not.toBe(collapsedFrame);
+    expect(headRequests.filter((url) => url.endsWith("details.html?prototype_state=expanded"))).toHaveLength(2);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Ir para tela" }), { target: { value: "details" } });
+    expect(new URLSearchParams(location.search).has("scenario_id")).toBe(false);
+    expect(new URLSearchParams(location.search).has("scenario_step")).toBe(false);
+    expect(screen.getByRole("combobox", { name: "Cenário" })).toHaveValue("");
+  });
+
+  it("enters a scenario from the toolbar and clears scenario URL state for manual Screen/State selection", async () => {
+    const fingerprint = "a".repeat(64);
+    history.replaceState({}, "", `/local?mode=presentation&company_id=company-a&project_id=project-a&artifact=prototype%3Alanding&prototype_id=landing&screen_id=start&state_id=initial&fingerprint=${fingerprint}&device=mobile&scale=fit`);
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/local-preview") return response(catalog);
+      if (url.startsWith("/api/local-preview?")) return response(detail(fingerprint, catalog.projects[0].artifacts));
+      if (init?.method === "HEAD") return Promise.resolve(new Response(null, { status: 200, headers: { "X-Builder-Snapshot-Fingerprint": fingerprint } }));
+      return response({});
+    }));
+
+    render(<LocalArtifactPreview />);
+    await screen.findByTitle("Prototype with colliding ID · Start · Initial");
+    fireEvent.change(screen.getByRole("combobox", { name: "Cenário" }), { target: { value: "review-path" } });
+    await screen.findByText("Etapa 1 de 4");
+    expect(new URLSearchParams(location.search).get("scenario_id")).toBe("review-path");
+    expect(new URLSearchParams(location.search).get("scenario_step")).toBe("0");
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Ir para tela" }), { target: { value: "details" } });
+    expect(new URLSearchParams(location.search).has("scenario_id")).toBe(false);
+    expect(new URLSearchParams(location.search).has("scenario_step")).toBe(false);
+    fireEvent.change(screen.getByRole("combobox", { name: "Cenário" }), { target: { value: "review-path" } });
+    await screen.findByText("Etapa 1 de 4");
+    fireEvent.change(screen.getByRole("combobox", { name: "Estado" }), { target: { value: "collapsed" } });
+    expect(new URLSearchParams(location.search).has("scenario_id")).toBe(false);
+    expect(new URLSearchParams(location.search).has("scenario_step")).toBe(false);
+    fireEvent.change(screen.getByRole("combobox", { name: "Cenário" }), { target: { value: "review-path" } });
+    await screen.findByText("Etapa 1 de 4");
+    fireEvent.change(screen.getByRole("combobox", { name: "Protótipo" }), { target: { value: "archived-demo" } });
+    expect(new URLSearchParams(location.search).has("scenario_id")).toBe(false);
+    expect(new URLSearchParams(location.search).has("scenario_step")).toBe(false);
+    expect(new URLSearchParams(location.search).get("prototype_id")).toBe("archived-demo");
+  });
+
+  it("shows migration TEACH for a bookmarked saved-v2-Go Prototype without probing or exposing raw HTML", async () => {
+    const fingerprint = "a".repeat(64);
+    history.replaceState({}, "", `/local?mode=presentation&company_id=company-a&project_id=project-a&artifact=prototype%3Alanding&prototype_id=landing&screen_id=start&state_id=initial&scenario_id=review-path&scenario_step=0&fingerprint=${fingerprint}&device=mobile&scale=fit`);
+    const headRequests: string[] = [];
+    const unavailableArtifacts = catalog.projects[0].artifacts.map((artifact) =>
+      artifact.kind === "prototype" && artifact.id === "landing"
+        ? { ...artifact, state: "invalid", diagnostic: "Saved Prototype schema v2 is not available after the v3 cutover. TEACH: run fresh Prototype status, adapt every offending v2 catalog/manifest, verify the complete collection go, then refresh registration." }
+        : artifact,
+    );
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/local-preview") return response(catalog);
+      if (url.startsWith("/api/local-preview?")) return response(detail(fingerprint, unavailableArtifacts));
+      if (init?.method === "HEAD") {
+        headRequests.push(url);
+        return Promise.resolve(new Response(null, { status: 200, headers: { "X-Builder-Snapshot-Fingerprint": fingerprint } }));
+      }
+      return response({});
+    }));
+
+    render(<LocalArtifactPreview />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Saved Prototype schema v2");
+    expect(screen.getByRole("alert")).toHaveTextContent("fresh Prototype status");
+    expect(screen.getByText("Abrir HTML bruto indisponível")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Abrir HTML bruto ↗" })).not.toBeInTheDocument();
+    expect(document.querySelector("iframe")).toBeNull();
+    expect(headRequests).toHaveLength(0);
+  });
+
+  it("rejects a scenario link whose step does not match its Screen/State before HEAD", async () => {
+    const fingerprint = "a".repeat(64);
+    history.replaceState({}, "", `/local?mode=presentation&company_id=company-a&project_id=project-a&artifact=prototype%3Alanding&prototype_id=landing&screen_id=details&state_id=expanded&scenario_id=review-path&scenario_step=0&fingerprint=${fingerprint}&device=mobile&scale=fit`);
+    const headRequests: string[] = [];
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/local-preview") return response(catalog);
+      if (url.startsWith("/api/local-preview?")) return response(detail(fingerprint, catalog.projects[0].artifacts));
+      if (init?.method === "HEAD") headRequests.push(url);
+      return Promise.resolve(new Response(null, { status: 200, headers: { "X-Builder-Snapshot-Fingerprint": fingerprint } }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<LocalArtifactPreview />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("não corresponde à Tela e ao Estado");
+    expect(headRequests).toHaveLength(0);
+    expect(screen.queryByRole("link", { name: "Abrir HTML bruto ↗" })).not.toBeInTheDocument();
+  });
+
+  it("restores a pinned scenario step on reload and rejects an out-of-range index", async () => {
+    const fingerprint = "a".repeat(64);
+    const savedURL = `/local?mode=presentation&company_id=company-a&project_id=project-a&artifact=prototype%3Alanding&prototype_id=landing&screen_id=details&state_id=expanded&scenario_id=review-path&scenario_step=2&fingerprint=${fingerprint}&device=mobile&scale=fit`;
+    history.replaceState({}, "", savedURL);
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/local-preview") return response(catalog);
+      if (url.startsWith("/api/local-preview?")) return response(detail(fingerprint, catalog.projects[0].artifacts));
+      return init?.method === "HEAD"
+        ? Promise.resolve(new Response(null, { status: 200, headers: { "X-Builder-Snapshot-Fingerprint": fingerprint } }))
+        : response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const mounted = render(<LocalArtifactPreview />);
+    expect(await screen.findByTitle("Prototype with colliding ID · Details · Expanded")).toBeInTheDocument();
+    expect(screen.getByText("Etapa 3 de 4")).toBeInTheDocument();
+    mounted.unmount();
+    render(<LocalArtifactPreview />);
+    expect(await screen.findByText("Etapa 3 de 4")).toBeInTheDocument();
+    expect(new URLSearchParams(location.search).get("scenario_step")).toBe("2");
+    cleanup();
+
+    history.replaceState({}, "", savedURL.replace("scenario_step=2", "scenario_step=9"));
+    fetchMock.mockClear();
+    render(<LocalArtifactPreview />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("etapa selecionada não existe");
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "HEAD")).toBe(false);
+    expect(screen.queryByRole("link", { name: "Abrir HTML bruto ↗" })).not.toBeInTheDocument();
+  });
+
   it("bounds stale fingerprint and failed exact-entry preflight with diagnostics", async () => {
     const current = "a".repeat(64);
     history.replaceState({}, "", `/local?mode=presentation&company_id=company-a&project_id=project-a&artifact=prototype%3Alanding&prototype_id=landing&screen_id=start&state_id=initial&fingerprint=${"b".repeat(64)}&device=mobile&scale=fit`);
@@ -900,12 +1090,14 @@ describe("LocalArtifactPreview", () => {
     expect(await screen.findByText(/Snapshot alterado/)).toBeInTheDocument();
     expect(screen.getByLabelText(`Snapshot fingerprint ${"b".repeat(64)}`)).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "HEAD")).toBe(false);
+    expect(screen.queryByRole("link", { name: "Abrir HTML bruto ↗" })).not.toBeInTheDocument();
     cleanup();
 
     history.replaceState({}, "", `/local?mode=presentation&company_id=company-a&project_id=project-a&artifact=prototype%3Alanding&prototype_id=landing&screen_id=start&state_id=initial&fingerprint=${current}&device=mobile&scale=fit`);
     render(<LocalArtifactPreview />);
     expect(await screen.findByText(/HTML desta entrada não está disponível/)).toBeInTheDocument();
     expect(screen.queryByRole("iframe")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Abrir HTML bruto ↗" })).not.toBeInTheDocument();
   });
 
   it("ignores a late HEAD success for a previously selected Screen", async () => {
@@ -950,6 +1142,8 @@ describe("LocalArtifactPreview", () => {
     expect(await screen.findByText(/Seleção inválida/)).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "HEAD")).toBe(false);
     expect(screen.queryByTitle(/Prototype with colliding ID/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Abrir HTML bruto ↗" })).not.toBeInTheDocument();
+    expect(screen.getByText("Abrir HTML bruto indisponível")).toBeInTheDocument();
   });
 
   it.each(["device=tablet", "scale=200"])(
@@ -992,6 +1186,8 @@ describe("LocalArtifactPreview", () => {
       render(<LocalArtifactPreview />);
       expect(await screen.findByText(/resposta não corresponde ao fingerprint selecionado/)).toBeInTheDocument();
       expect(screen.queryByTitle(/Prototype with colliding ID/)).not.toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Abrir HTML bruto ↗" })).not.toBeInTheDocument();
+      expect(screen.getByText("Abrir HTML bruto indisponível")).toBeInTheDocument();
     },
   );
 

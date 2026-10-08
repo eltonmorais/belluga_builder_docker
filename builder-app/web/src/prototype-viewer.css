@@ -315,6 +315,18 @@
   letter-spacing: .06em;
 }
 
+.prototype-presentation-scenario {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  white-space: nowrap;
+}
+
+.prototype-presentation-scenario span {
+  color: #475569;
+  font-size: 0.78rem;
+}
+
 .prototype-presentation-bar select,
 .prototype-presentation-toggle button {
   min-height: 32px;
