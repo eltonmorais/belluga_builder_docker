@@ -36,6 +36,9 @@ foundation_documentation_tmp/
 /local-api/v1/projects/builder/artifact-status.json
 /local-api/.fixtures-artifact-status.*
 /local-api/source-bindings.json
+/builder-app/web/node_modules/
+/builder-app/web/dist/
+/builder-app/web/tsconfig.tsbuildinfo
 
 # CLINE
 CLINE.md

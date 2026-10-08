@@ -51,6 +51,7 @@ func runStatus(args []string) error {
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
 	project, foundation := roots(flags)
 	out := flags.String("out", "local-api/v1/projects/builder/knowledge-status.json", "disposable response snapshot path")
+	stdoutOnly := flags.Bool("stdout-only", false, "write only the fresh response to stdout")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -105,8 +106,10 @@ func runStatus(args []string) error {
 		return err
 	}
 	data = append(data, '\n')
-	if err := atomicWrite(outPath, data, 0o644); err != nil {
-		return err
+	if !*stdoutOnly {
+		if err := atomicWrite(outPath, data, 0o644); err != nil {
+			return err
+		}
 	}
 	_, err = os.Stdout.Write(data)
 	return err

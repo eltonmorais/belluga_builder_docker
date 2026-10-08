@@ -247,3 +247,19 @@ func TestMalformedCommittedRevisionIsUsageAndNeverEchoed(t *testing.T) {
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("injected writer failure") }
+
+func TestEmitResponseStdoutOnlyDoesNotWriteSnapshot(t *testing.T) {
+	root := t.TempDir()
+	response := snapshotResponse("fresh-read", "evidence")
+	var stdout strings.Builder
+	if err := emitResponseMode(response, root, &stdout, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	var got ac.Response
+	if err := json.Unmarshal([]byte(stdout.String()), &got); err != nil || got.Mode != response.Mode {
+		t.Fatalf("fresh stdout response invalid: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(snapshotRelativePath))); !os.IsNotExist(err) {
+		t.Fatal("stdout-only evaluator wrote an observation snapshot")
+	}
+}

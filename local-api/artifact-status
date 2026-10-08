@@ -1,64 +1,6 @@
 #!/bin/sh
-set -u
-
-if [ "$#" -lt 1 ]; then
-	printf '%s\n' 'usage: local-api/artifact-status prototypes|design-system --mode working-tree|committed [--revision SHA] [--source-bindings PATH]' >&2
-	exit 64
-fi
-
-runner_target=$1
-shift
-if [ "$runner_target" != "prototypes" ] && [ "$runner_target" != "design-system" ]; then
-	printf '%s\n' 'artifact-status: target must be prototypes or design-system' >&2
-	exit 64
-fi
-
-if ! command -v docker >/dev/null 2>&1; then
-	printf '%s\n' 'artifact-status: Docker is required for local artifact validation' >&2
-	exit 70
-fi
-
-runner_directory=$(CDPATH= cd -P "$(dirname "$0")" && pwd) || exit 70
-repo_root=$(CDPATH= cd -P "$runner_directory/.." && pwd) || exit 70
-host_uid=$(id -u) || exit 70
-host_gid=$(id -g) || exit 70
-
-set +e
-docker run --rm \
-	-v "$repo_root:/workspace" \
-	-w /workspace/builder-app/service \
-	golang:1.23-alpine sh -c '
 set -eu
-if ! apk add --no-cache git su-exec >/dev/null; then
-	printf "artifact-status: container bootstrap dependency install failed\n" >&2
-	exit 70
-fi
-host_uid=$1
-host_gid=$2
-runner_target=$3
-shift 3
-temporary_directory=$(mktemp -d /tmp/artifact-status.XXXXXX) || { printf "artifact-status: temporary build directory creation failed\n" >&2; exit 70; }
-trap '\''rm -rf "$temporary_directory"'\'' EXIT HUP INT TERM
-if ! chown "$host_uid:$host_gid" "$temporary_directory"; then
-	printf "artifact-status: temporary build directory ownership setup failed\n" >&2
-	exit 70
-fi
-if ! su-exec "$host_uid:$host_gid" env GOCACHE="$temporary_directory/cache" GOPATH="$temporary_directory/path" \
-	go build -trimpath -buildvcs=false -o "$temporary_directory/artifact-status" ./cmd/artifact-status; then
-	printf "artifact-status: temporary binary build failed\n" >&2
-	exit 70
-fi
-set +e
-su-exec "$host_uid:$host_gid" env GOCACHE="$temporary_directory/cache" GOPATH="$temporary_directory/path" \
-	"$temporary_directory/artifact-status" "$runner_target" \
-	--project-root /workspace --foundation-root /workspace/belluga_builder_foundation_documentation "$@"
-child_status=$?
-set -e
-exit "$child_status"
-' artifact-status "$host_uid" "$host_gid" "$runner_target" "$@"
-runner_status=$?
-set -e
-case "$runner_status" in
-	0|2|64|70) exit "$runner_status" ;;
-	*) printf '%s\n' 'artifact-status: Docker or runner bootstrap failed' >&2; exit 70 ;;
-esac
+
+runner_directory=$(CDPATH= cd -P "$(dirname "$0")" && pwd) || { printf '%s\n' 'artifact-status: cannot resolve Builder local-api directory' >&2; exit 70; }
+repo_root=$(CDPATH= cd -P "$runner_directory/.." && pwd) || { printf '%s\n' 'artifact-status: cannot resolve Builder root' >&2; exit 70; }
+exec "$repo_root/delphi-ai/local-api/run" artifact-status "$@"

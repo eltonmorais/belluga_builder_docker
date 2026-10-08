@@ -35,6 +35,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	foundationDefault := filepath.Join(workspaceDefault, "belluga_builder_foundation_documentation")
 	foundation := flags.String("foundation-root", foundationDefault, "dedicated Builder Foundation Git checkout")
 	mode := flags.String("mode", "", "working-tree or committed")
+	stdoutOnly := flags.Bool("stdout-only", false, "write only the fresh response to stdout")
 	revision := flags.String("revision", "", "full committed Foundation SHA (committed mode only)")
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
 		fmt.Fprintln(stderr, "artifact-status: invalid arguments")
@@ -75,7 +76,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		if errors.Is(err, ac.ErrRevisionUnavailable) {
 			response := unavailableResponse(*mode, ac.DefaultProjectID, *revision)
-			if outputErr := emitResponse(response, projectRoot, stdout, []string{foundationRoot}); outputErr != nil {
+			if outputErr := emitResponseMode(response, projectRoot, stdout, []string{foundationRoot}, *stdoutOnly); outputErr != nil {
 				return fail(stderr, outputErr)
 			}
 			return 2
@@ -83,7 +84,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, err)
 	}
 	response := ac.Evaluate(source, ac.DefaultProjectID)
-	if err := emitResponse(response, projectRoot, stdout, []string{foundationRoot}); err != nil {
+	if err := emitResponseMode(response, projectRoot, stdout, []string{foundationRoot}, *stdoutOnly); err != nil {
 		return fail(stderr, err)
 	}
 	if response.Outcome == "go" {
@@ -126,6 +127,10 @@ func isFullRevision(value string) bool {
 }
 
 func emitResponse(response any, projectRoot string, stdout io.Writer, protectedRoots []string) error {
+	return emitResponseMode(response, projectRoot, stdout, protectedRoots, false)
+}
+
+func emitResponseMode(response any, projectRoot string, stdout io.Writer, protectedRoots []string, stdoutOnly bool) error {
 	if err := ensureSnapshotOutsideSources(projectRoot, protectedRoots...); err != nil {
 		return err
 	}
@@ -136,6 +141,9 @@ func emitResponse(response any, projectRoot string, stdout io.Writer, protectedR
 	data = append(data, '\n')
 	if _, err := stdout.Write(data); err != nil {
 		return err
+	}
+	if stdoutOnly {
+		return nil
 	}
 	return atomicSnapshot(projectRoot, data)
 }

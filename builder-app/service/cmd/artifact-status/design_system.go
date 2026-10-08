@@ -25,6 +25,7 @@ func runDesignSystem(args []string, stdout, stderr io.Writer) int {
 	foundation := flags.String("foundation-root", filepath.Join(workspaceDefault, "belluga_builder_foundation_documentation"), "bound Project Foundation Git checkout")
 	bindingsPath := flags.String("source-bindings", defaultSourceBindings, "trusted local source map inside workspace")
 	mode := flags.String("mode", "", "working-tree or committed")
+	stdoutOnly := flags.Bool("stdout-only", false, "write only the fresh response to stdout")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		fmt.Fprintln(stderr, "artifact-status: invalid arguments")
 		return 64
@@ -54,7 +55,7 @@ func runDesignSystem(args []string, stdout, stderr io.Writer) int {
 	}
 	protectedRoots := []string{foundationRoot}
 	emit := func(response any) error {
-		return emitResponse(response, projectRoot, stdout, protectedRoots)
+		return emitResponseMode(response, projectRoot, stdout, protectedRoots, *stdoutOnly)
 	}
 	mapPath, err := trustedFilePath(workspaceRoot, *bindingsPath)
 	if err != nil {

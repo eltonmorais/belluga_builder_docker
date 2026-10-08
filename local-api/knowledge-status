@@ -1,43 +1,6 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -lt 1 ]; then
-	printf '%s\n' 'usage: local-api/knowledge-status status|review-packet|record-review [flags]' >&2
-	exit 2
-fi
-
-runner_action=$1
-shift
-case "$runner_action" in
-	status|review-packet|record-review) ;;
-	*)
-		printf '%s\n' 'expected status, review-packet, or record-review' >&2
-		exit 2
-		;;
-esac
-
-if ! command -v docker >/dev/null 2>&1; then
-	printf '%s\n' 'Docker is required to run the local knowledge-status command' >&2
-	exit 127
-fi
-
-runner_directory=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
-repo_root=$(CDPATH= cd -P "$runner_directory/.." && pwd)
-host_uid=$(id -u)
-host_gid=$(id -g)
-
-exec docker run --rm --network bridge \
-	-v "$repo_root:/workspace" \
-	-w /workspace/builder-app/service \
-	golang:1.23-alpine sh -c '
-set -eu
-apk add --no-cache git su-exec >/dev/null
-host_uid=$1
-host_gid=$2
-runner_action=$3
-shift 3
-exec su-exec "$host_uid:$host_gid" env GOCACHE=/tmp/go-cache GOPATH=/tmp/go-path \
-	go run -buildvcs=false ./cmd/knowledge-status "$runner_action" \
-	--project-root /workspace \
-	--foundation-root /workspace/belluga_builder_foundation_documentation "$@"
-' knowledge-status "$host_uid" "$host_gid" "$runner_action" "$@"
+runner_directory=$(CDPATH= cd -P "$(dirname "$0")" && pwd) || { printf '%s\n' 'knowledge-status: cannot resolve Builder local-api directory' >&2; exit 70; }
+repo_root=$(CDPATH= cd -P "$runner_directory/.." && pwd) || { printf '%s\n' 'knowledge-status: cannot resolve Builder root' >&2; exit 70; }
+exec "$repo_root/delphi-ai/local-api/run" knowledge-status "$@"

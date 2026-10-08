@@ -149,6 +149,22 @@ func TestStatusMaterializesFreshRepeatableSnapshots(t *testing.T) {
 	}
 }
 
+func TestStatusCanReturnFreshReadWithoutWritingSnapshot(t *testing.T) {
+	project, foundation := newGitFixture(t)
+	args := []string{"--project-root", project, "--foundation-root", foundation, "--stdout-only"}
+	out := captureStdout(t, func() error { return runStatus(args) })
+	var response ks.Response
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Landing.Status != "unverifiable" || response.Roadmap.Status != "unverifiable" {
+		t.Fatalf("unexpected status: %+v", response)
+	}
+	if _, err := os.Stat(filepath.Join(project, "local-api/v1/projects/builder/knowledge-status.json")); !os.IsNotExist(err) {
+		t.Fatal("stdout-only status wrote a snapshot")
+	}
+}
+
 func assertStatusJSONContract(t *testing.T, data []byte, reviewedLanding, reviewedRoadmap bool, expected map[string][2]string) {
 	t.Helper()
 	var response map[string]json.RawMessage
