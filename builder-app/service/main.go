@@ -11,6 +11,19 @@ import (
 )
 
 func main() {
+	if stateRoot := strings.TrimSpace(os.Getenv("DELPHI_BUILDER_STATE_ROOT")); stateRoot != "" {
+		address := env("LISTEN_ADDR", "127.0.0.1:8080")
+		host, _, err := net.SplitHostPort(address)
+		if err != nil || (!isLoopback(host) && os.Getenv("ALLOW_CONTAINER_BIND") != "true") {
+			log.Fatal("listener must use a loopback address")
+		}
+		consumer := &registeredPreview{root: stateRoot}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/local-preview", consumer.apiHandler)
+		mux.HandleFunc("/snapshot/", consumer.artifactHandler)
+		mux.Handle("/", localStaticHandler(env("WEB_ROOT", "/web")))
+		log.Fatal((&http.Server{Addr: address, Handler: secureHeaders(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16}).ListenAndServe())
+	}
 	if len(os.Args) > 1 && os.Args[1] == "export" {
 		flags := flag.NewFlagSet("export", flag.ExitOnError)
 		repo := flags.String("repo", "", "trusted Foundation git checkout")
